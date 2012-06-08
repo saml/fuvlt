@@ -2,6 +2,9 @@ package fuvlt;
 
 //http://docs.oracle.com/javase/tutorial/essential/io/examples/WatchDir.java
 
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.client.methods.HttpPut;
+
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 import static java.nio.file.StandardWatchEventKinds.ENTRY_CREATE;
 import static java.nio.file.StandardWatchEventKinds.ENTRY_DELETE;
@@ -9,6 +12,8 @@ import static java.nio.file.StandardWatchEventKinds.ENTRY_MODIFY;
 import static java.nio.file.StandardWatchEventKinds.OVERFLOW;
 
 import java.io.IOException;
+import java.lang.InterruptedException;
+import java.lang.Thread;
 import java.nio.file.FileSystems;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -21,9 +26,7 @@ import java.nio.file.WatchKey;
 import java.nio.file.WatchService;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.concurrent.*;
 
 /**
@@ -43,11 +46,14 @@ public class WatchDir {
         ".vlt",
         "/svn-",
         "/vlt-",
-        ".xml"
+        ".xml",
+        ".git",
+        //".swp",
+        "__jb_"
     };
     
 
-    private static final String endpoint = "http://localhost:4502";
+    private static final String endpoint = "http://localhost:4502/";
 
 
     private static class Pair<K,V> {
@@ -73,30 +79,43 @@ public class WatchDir {
 
     private static class Worker implements Runnable {
 
-        private final BlockingQueue<Pair<Path, Kind<?>>> map;
-        public Worker() {
-            map = new LinkedBlockingQueue<Pair<Path, Kind<?>>>();
+        private final BlockingQueue<Pair<Path, Kind<?>>> queue;
+        private final BlockingQueue<Pair<Path, Kind<?>>> normalized;
+        private final Path baseDir;
+        private final String endpoint;
+
+        public Worker(Path baseDir, String endpoint) {
+            queue = new LinkedBlockingQueue<Pair<Path, Kind<?>>>();
+            normalized = new LinkedBlockingQueue<Pair<Path, Kind<?>>>();
+            this.baseDir = baseDir;
+            this.endpoint = endpoint;
         }
         
         public void push(WatchEvent.Kind<?> kind, Path path) {
-            map.add(new Pair<Path, Kind<?>>(path, kind));
-            System.out.format("push: %s\n", map);
+            queue.add(new Pair<Path, Kind<?>>(path, kind));
         }
         
         private void putFile(Path path) {
-            System.out.format("putFile: %s\n", path);
+            path = baseDir.relativize(path);
+            final String url = endpoint + path;
+
+            final HttpPut put = new HttpPut(url);
+
+            System.out.format("putFile: %s\n", url);
         }
         
         private void removeFile(Path path) {
-            System.out.format("removeFile: %s\n", path);
+            path = baseDir.relativize(path);
+            final String url = endpoint + path;
+            System.out.format("removeFile: %s\n", url);
         }
         
         @Override
         public void run() {
             while (true) {
-                while (!map.isEmpty()) {
+                while (!queue.isEmpty()) {
                     try {
-                        final Pair<Path, Kind<?>> pair = map.take();
+                        final Pair<Path, Kind<?>> pair = queue.take();
                         final Path path = pair.getFirst();
                         final Kind<?> kind = pair.getSecond();
                         if (ENTRY_DELETE.equals(kind)) {
@@ -108,6 +127,13 @@ public class WatchDir {
                         e.printStackTrace();  //To change body of catch statement use File | Settings | File Templates.
                     }
                 }
+
+                try {
+                    Thread.sleep(2000L);
+                } catch (InterruptedException e) {
+
+                }
+
 
             }
         }
@@ -177,7 +203,7 @@ public class WatchDir {
         this.trace = true;
         
         baseDir = dir;
-        worker = new Worker();
+        worker = new Worker(baseDir, endpoint);
     }
 
     private static boolean shouldIgnore(Path path) {
@@ -188,7 +214,11 @@ public class WatchDir {
         }
         return false;
     }
-    
+
+    private static boolean shouldIgnore(Kind<?> kind) {
+        return !(ENTRY_DELETE.equals(kind) || ENTRY_MODIFY.equals(kind));
+
+    }
     private void process(Kind<?> kind, Path path) {
         if (ENTRY_DELETE.equals(kind) || Files.isRegularFile(path, NOFOLLOW_LINKS)) {
             worker.push(kind, path);
@@ -228,10 +258,11 @@ public class WatchDir {
                 final Path name = ev.context();
                 final Path child = dir.resolve(name);
 
-                if (!shouldIgnore(child)) {
+                System.out.format("%s: %s\n", event.kind().name(), child);
+                if (!shouldIgnore(child) && !shouldIgnore(kind)) {
                     // print out event
                     process(kind, child);
-                    System.out.format("%s: %s\n", event.kind().name(), child);
+
                 }
 
                 // if directory is created, and watching recursively, then
