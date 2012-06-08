@@ -24,9 +24,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 
 /**
  * Example to watch a directory (or tree) for changes to files.
@@ -36,7 +34,6 @@ public class WatchDir {
 
     private final WatchService watcher;
     private final Map<WatchKey,Path> keys;
-    private final boolean recursive;
     private boolean trace = false;
     private final Path baseDir;
     private final Worker worker;
@@ -52,15 +49,37 @@ public class WatchDir {
 
     private static final String endpoint = "http://localhost:4502";
 
-    
+
+    private static class Pair<K,V> {
+        private final K first;
+        private final V second;
+        public Pair(K first, V second) {
+            this.first = first;
+            this.second = second;
+        }
+
+        public K getFirst() {
+            return first;
+        }
+        public V getSecond() {
+            return second;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("(%s,%s)", first, second);
+        }
+    }
+
     private static class Worker implements Runnable {
-        private final ConcurrentMap<Path, Kind<?>> map;
+
+        private final BlockingQueue<Pair<Path, Kind<?>>> map;
         public Worker() {
-            map = new ConcurrentHashMap<Path, Kind<?>>();
+            map = new LinkedBlockingQueue<Pair<Path, Kind<?>>>();
         }
         
         public void push(WatchEvent.Kind<?> kind, Path path) {
-            map.put(path, kind);
+            map.add(new Pair<Path, Kind<?>>(path, kind));
             System.out.format("push: %s\n", map);
         }
         
@@ -75,26 +94,21 @@ public class WatchDir {
         @Override
         public void run() {
             while (true) {
-                if (map.isEmpty()) {
+                while (!map.isEmpty()) {
                     try {
-                        Thread.sleep(2000L);
-                    } catch (InterruptedException e) {
-                    }
-                } else {
-                    final Iterator<Entry<Path, Kind<?>>> iter = map.entrySet().iterator();
-                    while (iter.hasNext()) {
-                        final Entry<Path, Kind<?>> entry = iter.next();
-                        final Path path = entry.getKey();
-                        final Kind<?> kind = entry.getValue();
+                        final Pair<Path, Kind<?>> pair = map.take();
+                        final Path path = pair.getFirst();
+                        final Kind<?> kind = pair.getSecond();
                         if (ENTRY_DELETE.equals(kind)) {
                             removeFile(path);
                         } else {
                             putFile(path);
                         }
-                        iter.remove();
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();  //To change body of catch statement use File | Settings | File Templates.
                     }
-                    System.out.format("%s\n", map);
                 }
+
             }
         }
         
@@ -149,18 +163,15 @@ public class WatchDir {
     /**
      * Creates a WatchService and registers the given directory
      */
-    WatchDir(Path dir, boolean recursive) throws IOException {
+    WatchDir(Path dir) throws IOException {
         this.watcher = FileSystems.getDefault().newWatchService();
         this.keys = new HashMap<WatchKey,Path>();
-        this.recursive = recursive;
 
-        if (recursive) {
-            System.out.format("Scanning %s ...\n", dir);
-            registerAll(dir);
-            System.out.println("Done.");
-        } else {
-            register(dir);
-        }
+
+        System.out.format("Scanning %s ...\n", dir);
+        registerAll(dir);
+        System.out.println("Done.");
+
 
         // enable trace after initial registration
         this.trace = true;
@@ -225,7 +236,7 @@ public class WatchDir {
 
                 // if directory is created, and watching recursively, then
                 // register it and its sub-directories
-                if (recursive && (kind == ENTRY_CREATE)) {
+                if ((kind == ENTRY_CREATE)) {
                     try {
                         if (Files.isDirectory(child, NOFOLLOW_LINKS)) {
                             registerAll(child);
@@ -250,26 +261,17 @@ public class WatchDir {
     }
 
     static void usage() {
-        System.err.println("usage: java WatchDir [-r] dir");
+        System.err.format("usage: java %s dir\n", WatchDir.class.getCanonicalName());
         System.exit(-1);
     }
 
     public static void main(String[] args) throws IOException {
-        // parse arguments
-        if (args.length == 0 || args.length > 2)
+        if (args.length < 1) {
             usage();
-        boolean recursive = false;
-        int dirArg = 0;
-        if (args[0].equals("-r")) {
-            if (args.length < 2)
-                usage();
-            recursive = true;
-            dirArg++;
         }
 
-        // register directory and process its events
-        Path dir = Paths.get(args[dirArg]);
-        final WatchDir watchDir = new WatchDir(dir, recursive);
+        Path dir = Paths.get(args[0]);
+        final WatchDir watchDir = new WatchDir(dir);
         Executors.newFixedThreadPool(1).execute(watchDir.getWorker());
         watchDir.processEvents();
     }
